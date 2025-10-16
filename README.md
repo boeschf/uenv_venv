@@ -1,6 +1,6 @@
 # uenv-venv
 
-Create a Python venv layered on top of an active **uenv** view — cleanly:
+Create a Python venv layered on top of an active uenv view
 
 - Fails fast if `PYTHONPATH` is set (to avoid broken resolver/imports).
 - Prefer `uv venv --seed`, fallback to stdlib `python -m venv`.
