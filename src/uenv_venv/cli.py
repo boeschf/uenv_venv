@@ -1,26 +1,5 @@
-#!/usr/bin/env python3
-"""
-uenv-venv: create a Python venv on top of an active uenv.
-
-Features:
-  - uses `uv venv` if available, else Python's built-in `venv`
-  - refuses to run if the selected Python is NOT inside the active uenv
-  - ignores uenv's PYTHONPATH when creating the venv
-  - writes a .pth so the venv sees packages from the uenv's site-packages:
-      <mount>/env/<uenv-name>/lib/pythonX.Y/site-packages
-
-Reads env:
-  UENV_VIEW="<mount>:<uenv-name>:<view-name>"
-
-Usage:
-  uenv-venv --venv ~/venvs/myvenv
-Options:
-  --python /path/to/python  (defaults to current interpreter)
-  --force                   (remove existing venv directory first)
-  --copies                  (prefer copies instead of symlinks)
-"""
-
 from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -29,7 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
-import venv
+
+
+def _err(msg: str, code: int = 2):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
 
 def ensure_no_pythonpath():
     pp = os.environ.get("PYTHONPATH")
@@ -55,6 +39,7 @@ def ensure_no_pythonpath():
         print(msg, file=sys.stderr)
         sys.exit(2)
 
+
 def parse_uenv() -> tuple[Path, str, str]:
     uv = os.environ.get("UENV_VIEW", "")
     if uv:
@@ -69,7 +54,8 @@ def parse_uenv() -> tuple[Path, str, str]:
             if token and ":" in token:
                 mount = token.rsplit(":", 1)[-1]
                 return Path(mount), "", ""
-    sys.exit("ERROR: Could not detect uenv.")
+    _err("ERROR: Could not detect uenv.")
+
 
 def py_in_uenv(py: Path, mount: Path) -> bool:
     try:
@@ -77,11 +63,11 @@ def py_in_uenv(py: Path, mount: Path) -> bool:
     except Exception:
         return False
 
+
 def discover_uenv_site_packages(mount: Path, view_name: str, py: Path) -> Path:
     """
-    Prefer the uenv *view* site-packages by scanning the interpreter's sys.path
+    Prefer the uenv view site-packages by scanning the interpreter's sys.path
     for entries under: <mount>/env/<view_name>/lib/pythonX.Y/site-packages
-
     If not found, fall back to the deterministic path and verify it exists.
     """
     # Ask the chosen Python for version and sys.path
@@ -101,27 +87,36 @@ print(json.dumps({"ver": pyver, "path": sys.path}))
     # Prefer the first sys.path entry that is inside the view's site-packages
     for p in sys_path:
         try:
-            if p.is_dir() and str(p).startswith(str(want_prefix)):
-                return p
+            pr = p.resolve()
         except Exception:
-            pass
+            continue
+        if pr.is_dir() and pr.as_posix().startswith(want_prefix.as_posix()):
+            return pr
 
     # Fallback: use the deterministic view path if it exists
     if want_prefix.is_dir():
         return want_prefix
 
-    # As a last resort, error with a helpful message
-    raise SystemExit(
-        "ERROR: Could not locate the uenv view's site-packages.\n"
-        f"  looked for: {want_prefix}\n"
-        "Hint: ensure the uenv is active and exposes its view on sys.path, "
-        "or pass --mount and --uenv-name and verify the directory exists."
+    _err(
+        dedent(
+            f"""
+            ERROR: Could not locate the uenv view's site-packages.
+              looked for: {want_prefix}
+            Hint: ensure the uenv is active and exposes its view on sys.path.
+            """
+        ).strip()
     )
+
 
 def venv_site_packages(venv_python: Path) -> Path:
     code = "import sysconfig;print(sysconfig.get_paths()['purelib'])"
     out = subprocess.check_output([str(venv_python), "-c", code]).decode().strip()
     return Path(out)
+
+
+def _venv_python(target: Path) -> Path:
+    return target / "bin/python"
+
 
 def upgrade_bootstrap(venv_python: Path, env: dict) -> None:
     """
@@ -140,14 +135,14 @@ def upgrade_bootstrap(venv_python: Path, env: dict) -> None:
         # Use uv against the venv explicitly
         subprocess.check_call(
             [uv, "pip", "install", "-p", str(venv_python), "-U", "pip", "setuptools", "wheel"],
-            env=env
+            env=env,
         )
     else:
         # Fallback to pip inside the venv
         subprocess.check_call(
-            [str(venv_python), "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"],
-            env=env
+            [str(venv_python), "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"], env=env
         )
+
 
 def create_with_uv(target: Path, py: Path, copies: bool, env: dict) -> None:
     uv = shutil.which("uv")
@@ -157,19 +152,26 @@ def create_with_uv(target: Path, py: Path, copies: bool, env: dict) -> None:
     if copies:
         cmd.append("--copies")
     subprocess.check_call(cmd, env=env)
-    upgrade_bootstrap(target / "bin/python", env)
+    upgrade_bootstrap(_venv_python(target), env)
+
 
 def create_with_stdlib(target: Path, py: Path, copies: bool, env: dict) -> None:
     cmd = [str(py), "-m", "venv", str(target)]
     if copies:
         cmd.append("--copies")
     subprocess.check_call(cmd, env=env)
-    upgrade_bootstrap(target / "bin/python", env)
+    upgrade_bootstrap(_venv_python(target), env)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Create a venv layered on an active uenv.")
     ap.add_argument("--venv", required=True, type=Path, help="Target venv directory")
-    ap.add_argument("--python", default=sys.executable, type=Path, help="Python to seed the venv (must be inside the uenv)")
+    ap.add_argument(
+        "--python",
+        default=sys.executable,
+        type=Path,
+        help="Python to seed the venv (must be inside the uenv)",
+    )
     ap.add_argument("--force", action="store_true", help="Remove existing venv if present")
     ap.add_argument("--copies", action="store_true", help="Use file copies instead of symlinks")
     args = ap.parse_args()
@@ -177,39 +179,45 @@ def main():
     mount, name, view = parse_uenv()
 
     if not name:
-        sys.exit("ERROR: Could not detect uenv.")
-
-    if not view:
-        sys.exit("ERROR: Could not detect active view.")
-
+        _err("ERROR: Could not detect uenv name.")
     if not mount.is_dir():
-        sys.exit(f"ERROR: mount point does not exist: {mount}")
+        _err(f"ERROR: mount point does not exist: {mount}")
+    if not view:
+        _err("ERROR: Could not detect active view.")
 
     # Enforce: interpreter must live inside the uenv mount
     py = args.python.resolve()
     if not py.exists():
-        sys.exit(f"ERROR: --python not found: {py}")
+        _err(f"ERROR: --python not found: {py}")
     if not py_in_uenv(py, mount):
-        sys.exit(f"ERROR: Selected Python is not inside the uenv mount.\n  python: {py}\n  mount:  {mount}\n"
-                 f"Hint: pass --python /user-environment/env/{view}/bin/python")
+        _err(
+            dedent(
+                f"""
+                ERROR: Selected Python is not inside the uenv mount.
+                  python: {py}
+                  mount:  {mount}
+
+                Hint: pass --python {mount}/env/{view}/bin/python
+                """
+            ).strip()
+        )
 
     # Compute uenv site-packages path
     uenv_sp = discover_uenv_site_packages(mount, view, py)
     if not uenv_sp.is_dir():
-        sys.exit(f"ERROR: uenv site-packages not found: {uenv_sp}")
+        _err(f"ERROR: uenv site-packages not found: {uenv_sp}")
+
+    ensure_no_pythonpath()
 
     # Prepare venv dir
     if args.force and args.venv.exists():
         shutil.rmtree(args.venv)
     if args.venv.exists() and any(args.venv.iterdir()):
-        sys.exit(f"ERROR: venv directory exists and is not empty: {args.venv} (use --force)")
+        _err(f"ERROR: venv directory exists and is not empty: {args.venv} (use --force)")
     args.venv.mkdir(parents=True, exist_ok=True)
 
-    # environment variables
-    ensure_no_pythonpath()
+    # Create venv
     env = os.environ
-
-    # Create venv (prefer uv)
     try:
         create_with_uv(args.venv, py, args.copies, env)
         used = "uv"
@@ -217,8 +225,8 @@ def main():
         create_with_stdlib(args.venv, py, args.copies, env)
         used = "venv"
 
-    # Compute venv python & its site-packages
-    vpy = args.venv / "bin/python"
+    # Compute venv python and its site-packages
+    vpy = _venv_python(args.venv)
     vsp = venv_site_packages(vpy)
 
     # Write .pth so venv sees uenv’s site-packages
@@ -237,8 +245,9 @@ def main():
     print()
     print("Activate with:")
     print(f"source {act}")
-    #print("Sanity check:           python -c \"import sys; print(any('site-packages' in p and '/env/' in p for p in sys.path))\"")
+
+    return 0
+
 
 if __name__ == "__main__":
     main()
-
